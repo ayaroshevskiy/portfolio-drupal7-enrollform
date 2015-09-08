@@ -1,0 +1,10 @@
+name = Kcc Enrollform
+description = Extra customization in order to create Enrollment form.
+core = 7.x
+package = Custom
+version = 7.x-1.0
+project = kcc_enrollform
+
+dependencies[] = webform
+dependencies[] = encrypt
+dependencies[] = kcc_enrollform_type_feature

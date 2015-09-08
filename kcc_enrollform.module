@@ -1,0 +1,1054 @@
+<?php
+/**
+ * @file
+ * Functions for customization Enrollment form.
+ */
+
+/**
+ * To make all labels visible above on the submission page.
+ *
+ * @see hook_node_load()
+ *
+ * @param array $nodes
+ *   An array of the nodes being loaded, keyed by nid.
+ *
+ * @param array $types
+ *   An array containing the node types present in $nodes.
+ */
+function kcc_enrollform_node_load($nodes, $types) {
+
+  if (arg(0) != 'node' || arg(2) != 'submission' || arg(4) == 'edit') {
+    return;
+  }
+
+  if (count($nodes) > 1) {
+    return;
+  }
+
+  // Quick check to see if we need to do anything at all for these nodes.
+  $webform_types = webform_variable_get('webform_node_types');
+  if (count(array_intersect($types, $webform_types)) == 0) {
+    return;
+  }
+
+  $excluded_types = array('markup', 'pagebreak');
+
+  foreach ($nodes as $nid => $node) {
+    if ($node->type == 'enrollform') {
+      foreach ($node->webform['components'] as $cid => $component) {
+        if (isset($component['extra']['title_display'])) {
+          $node->webform['components'][$cid]['extra']['title_display'] = 'before';
+        }
+        if (isset($component['type']) && in_array($component['type'], $excluded_types)) {
+          unset($node->webform['components'][$cid]);
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Alter element output.
+ *
+ * Add attribute size to select list element by class of component.
+ * Generate JSON of Datatel Programs and add one to Drupal.setting variable.
+ *
+ * @see hook_webform_component_render_alter()
+ *
+ * @param array $element
+ *   The display element as returned by _webform_render_component().
+ *
+ * @param array $component
+ *   A Webform component array.
+ */
+function kcc_enrollform_webform_component_render_alter(&$element, &$component) {
+
+  if ($component['type'] == 'select') {
+    if (isset($component['extra']['css_classes']) && !empty($component['extra']['css_classes'])) {
+      $css_classes = explode(' ', $component['extra']['css_classes']);
+      $size = NULL;
+      foreach ($css_classes as $css_class) {
+        if (strpos($css_class, 'size-') !== FALSE) {
+          $size = (int) str_replace('size-', '', $css_class);
+          break;
+        }
+      }
+      if ($size) {
+        $size_attr = array('size' => $size);
+        if (isset($element['#attributes']) && is_array($element['#attributes'])) {
+          $element['#attributes'] = array_merge($element['#attributes'], $size_attr);
+        }
+        else {
+          $element['#attributes'] = $size_attr;
+        }
+        $size_class = array('auto-height');
+        if (isset($element['#attributes']['class']) && is_array($element['#attributes']['class'])) {
+          $element['#attributes']['class'] = array_merge($element['#attributes']['class'], $size_class);
+        }
+        else {
+          $element['#attributes']['class'] = $size_class;
+        }
+        unset($element['#empty_value']);
+        unset($element['#empty_option']);
+      }
+    }
+  }
+
+  if ($component['form_key'] == 'datatel_acad_programs') {
+    if (isset($element['#options']) && is_array($element['#options'])) {
+      $programs_json = array();
+      foreach ($element['#options'] as $key => $value) {
+        $programs_json[] = array('id' => $key, 'title' => $value);
+      }
+      if (!empty($programs_json)) {
+        drupal_add_js(
+          array(
+            'kcc_enrollform' => array(
+              'acad_programs' => $programs_json,
+            ),
+          ),
+          'setting'
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Decrypt values when displaying Webform submissions.
+ *
+ * @see hook_webform_submission_load()
+ *
+ * @param array $submissions
+ *   An array of Webform submissions that are being loaded, keyed by the
+ *   submission ID. Modifications to the submissions are done by reference.
+ */
+function kcc_enrollform_webform_submission_load(&$submissions) {
+  foreach ($submissions as $sid => $submission) {
+    $node = node_load($submission->nid);
+    if ($node->type == 'enrollform') {
+      foreach ($submission->data as $cid => $values) {
+        foreach ($values as $vid => $value) {
+          if ($value) {
+            $submissions[$sid]->data[$cid][$vid] = decrypt($value, array('base64' => TRUE));
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Alter the display of a Webform submission.
+ *
+ * @see hook_webform_submission_render_alter()
+ *
+ * @param array $renderable
+ *   The Webform submission in a renderable array, similar to FormAPI's
+ *   structure. This variable must be passed in by-reference. Important
+ *   properties of this array include #node, #submission, #email, and #format,
+ *   which can be used to find the context of the submission that is being
+ *   rendered.
+ */
+function kcc_enrollform_webform_submission_render_alter(&$renderable) {
+  if (isset($renderable['educational_history']['institutions_attended']['institutions_attended_results'])) {
+    $field = $renderable['educational_history']['institutions_attended']['institutions_attended_results'];
+    $field_markup = $field['#markup'];
+    if (isset($field['#webform_component'])) {
+      $component = $field['#webform_component'];
+      $cid = isset($component['cid']) ? $component['cid'] : NULL;
+      if ($cid) {
+        $component_data = NULL;
+        if (isset($renderable['#submission']->data[$cid])) {
+          $component_data = $renderable['#submission']->data[$cid];
+        }
+        if ($component_data) {
+          $field_markup = '';
+          foreach ($component_data as $value) {
+            $grad_label = '';
+            $grad_date = '';
+            $start_date = '';
+            $value_arr = explode(',', $value);
+            if (isset($value_arr[0]) && $value_arr[0] == 'S') {
+              $label = isset($value_arr[2]) && !empty($value_arr[2]) ? _kcc_enrollform_get_datatel_inst_label($value_arr[2]) : NULL;
+              $end_date = isset($value_arr[3]) && !empty($value_arr[3]) ? format_date(strtotime($value_arr[3]), 'custom', 'd F Y') : NULL;
+            }
+            else {
+              $label = isset($value_arr[3]) && !empty($value_arr[3]) ? _kcc_enrollform_get_datatel_inst_label($value_arr[3]) : NULL;
+              $grad_label = NULL;
+              if (isset($value_arr[1]) && !empty($value_arr[1])) {
+                $grads = _kcc_enrollform_get_datatel_other_degrees($value_arr[1]);
+                $grad_label = $grads[$value_arr[1]];
+              }
+              $grad_date = isset($value_arr[2]) && !empty($value_arr[2]) ? format_date(strtotime($value_arr[2]), 'custom', 'd F Y') : NULL;
+              $start_date = isset($value_arr[4]) && !empty($value_arr[4]) ? format_date(strtotime($value_arr[4]), 'custom', 'd F Y') : NULL;
+              $end_date = isset($value_arr[5]) && !empty($value_arr[5]) ? format_date(strtotime($value_arr[5]), 'custom', 'd F Y') : NULL;
+            }
+            if ($label) {
+              $field_markup .= $label . ', ';
+            }
+            if ($start_date) {
+              $field_markup .= $start_date . ' - ';
+            }
+            if ($end_date) {
+              $field_markup .= $end_date;
+            }
+            if ($grad_label) {
+              $field_markup .= ', ' . $grad_label;
+            }
+            if ($grad_date) {
+              $field_markup .= ', ' . $grad_date;
+            }
+            $field_markup .= '<br />';
+          }
+        }
+      }
+    }
+    $renderable['educational_history']['institutions_attended']['institutions_attended_results']['#markup'] = $field_markup;
+    $renderable['educational_history']['institutions_attended']['institutions_attended_results']['#format'] = 'full_html';
+  }
+}
+
+/**
+ * Encrypt values when submission is saved.
+ *
+ * @see hook_webform_submission_presave()
+ *
+ * @param Object $node
+ *   The Webform node on which this submission was made.
+ * @param Object $submission
+ *   The Webform submission that is about to be saved to the database.
+ */
+function kcc_enrollform_webform_submission_presave($node, &$submission) {
+  if ($node->type == 'enrollform') {
+    foreach ($submission->data as $cid => $values) {
+      foreach ($values as $vid => $value) {
+        if ($value) {
+          $submission->data[$cid][$vid] = encrypt($value, array('base64' => TRUE));
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Define callbacks for Datatel select list options.
+ *
+ * @return array
+ *   An array of callbacks that can be used for select list options.
+ */
+function kcc_enrollform_webform_select_options_info() {
+  $items = array();
+
+  $items['datatel_racial_groups'] = array(
+    'title' => t('Datatel Racial Groups'),
+    'options callback' => '_kcc_enrollform_get_datatel_vals',
+    'options arguments' => array('valcode_id' => 'PERSON.RACES'),
+  );
+
+  $items['datatel_ethnic_groups'] = array(
+    'title' => t('Datatel Ethnic Groups'),
+    'options callback' => '_kcc_enrollform_get_datatel_ethnic_groups',
+  );
+
+  $items['datatel_alien_statuses'] = array(
+    'title' => t('Datatel Alien Statuses'),
+    'options callback' => '_kcc_enrollform_get_datatel_vals',
+    'options arguments' => array('valcode_id' => 'ALIEN.STATUSES'),
+  );
+
+  $items['datatel_terms'] = array(
+    'title' => t('Datatel Terms'),
+    'options callback' => '_kcc_enrollform_get_datatel_terms',
+  );
+
+  $items['datatel_admit_statuses'] = array(
+    'title' => t('Datatel Admit Statuses'),
+    'options callback' => '_kcc_enrollform_get_datatel_admit_statuses',
+  );
+
+  $items['datatel_acad_programs'] = array(
+    'title' => t('Datatel Acad Programs'),
+    'options callback' => '_kcc_enrollform_get_datatel_acad_programs',
+  );
+
+  $items['datatel_education_goals'] = array(
+    'title' => t('Datatel Education Goals'),
+    'options callback' => '_kcc_enrollform_get_datatel_vals',
+    'options arguments' => array('valcode_id' => 'EDUCATION.GOALS'),
+  );
+
+  $items['datatel_student_loads'] = array(
+    'title' => t('Datatel Student Loads'),
+    'options callback' => '_kcc_enrollform_get_datatel_vals',
+    'options arguments' => array('valcode_id' => 'STUDENT.LOADS'),
+  );
+
+  $items['datatel_apply_influences'] = array(
+    'title' => t('Datatel Apply Influences'),
+    'options callback' => '_kcc_enrollform_get_datatel_vals',
+    'options arguments' => array('valcode_id' => 'APPL.INFLUENCES'),
+  );
+
+  return $items;
+}
+
+/**
+ * Alter the Enrollnemt Form.
+ *
+ * Add extra elements and logic for Education History area.
+ *
+ * @see hook_form_alter()
+ *
+ * @param array $form
+ *   Nested array of form elements that comprise the form.
+ *
+ * @param array $form_state
+ *   A keyed array containing the current state of the form.
+ *
+ * @param string $form_id
+ *   String representing the name of the form itself
+ */
+function kcc_enrollform_form_alter(&$form, &$form_state, $form_id) {
+
+  $declined_forms = array(
+    'webform_analysis_components_form',
+    'webform_components_form',
+    'enrollform_node_form',
+    'webform_conditionals_form',
+    'webform_emails_form',
+    'webform_configure_form',
+    'webform_component_edit_form',
+  );
+
+  if (in_array($form_id, $declined_forms)) {
+    return;
+  }
+
+  if (isset($form['#node']) && $form['#node']->type == 'enrollform') {
+
+    // Attach JS for Validation and Popup to form.
+    $form['#attached']['js'] = array_merge($form['#attached']['js'], array(
+      drupal_get_path('module', 'kcc_enrollform') . '/js/jquery.validate.min.js',
+      drupal_get_path('module', 'kcc_enrollform') . '/js/magnific.popup.min.js',
+      drupal_get_path('module', 'kcc_enrollform') . '/js/underscore-min.js',
+      drupal_get_path('module', 'kcc_enrollform') . '/js/jquery.cookie.js',
+      drupal_get_path('module', 'kcc_enrollform') . '/js/kcc_enrollform.js',
+    ));
+
+    // Attach CSS for popup to form.
+    $form['#attached']['css'] = array_merge($form['#attached']['js'], array(drupal_get_path('module', 'kcc_enrollform') . '/css/magnific.popup.css'));
+
+    // Add markup element for selected list of education history.
+    if (isset($form['submitted']['educational_history']['institutions_attended']['institutions_attended_results'])) {
+      $institutions_attended_results = $form['submitted']['educational_history']['institutions_attended']['institutions_attended_results'];
+      $next_weight = $institutions_attended_results['#weight'] + 1;
+
+      // Create fieldset for High Schools.
+      $high_school_fieldset = array(
+        '#title' => t('High School / GED Information'),
+        '#type' => 'fieldset',
+        '#weight' => $next_weight,
+        '#description' => t('High School or Equivalent'),
+        '#attributes' => array(
+          'class' => array('webform-component-fieldset', 'add-school-popup'),
+        ),
+        '#access' => TRUE,
+      );
+
+      $next_weight++;
+
+      // Create High School Type select.
+      $high_school_type = array(
+        '#required' => 1,
+        '#weight' => 10,
+        '#empty_value' => '',
+        '#empty_option' => t('Type'),
+        '#options' => array(
+          'HS' => 'High School',
+          'GED' => 'GED',
+          'FHS' => 'Foreign High School',
+        ),
+        '#default_value' => NULL,
+        '#type' => 'select',
+        '#access' => TRUE,
+        '#validated' => TRUE,
+      );
+
+      // Add High School Type select to High School fieldset.
+      $high_school_fieldset['high_school_type'] = $high_school_type;
+
+      // Create High School State select.
+      $high_school_state = array(
+        '#required' => 1,
+        '#weight' => 20,
+        '#empty_value' => '',
+        '#empty_option' => t('State'),
+        '#options' => array(
+          'illinois' => 'Illinois High School',
+          'out' => 'Out of State',
+        ),
+        '#default_value' => NULL,
+        '#type' => 'select',
+        '#access' => TRUE,
+        '#validated' => TRUE,
+      );
+
+      // Add High School State select to High School fieldset.
+      $high_school_fieldset['high_school_state'] = $high_school_state;
+
+      // Create High School select.
+      $high_schools = array(
+        '#required' => 1,
+        '#weight' => 30,
+        '#empty_value' => '',
+        '#empty_option' => t('Select High School'),
+        '#options' => array(),
+        '#default_value' => NULL,
+        '#type' => 'select',
+        '#access' => TRUE,
+        '#validated' => TRUE,
+      );
+
+      // Add High School select to High School fieldset.
+      $high_school_fieldset['high_schools'] = $high_schools;
+
+      // Create High School graduation date select.
+      $high_school_graduation_date = array(
+        '#title' => t('Date of Graduation'),
+        '#title_display' => 'before',
+        '#required' => 1,
+        '#weight' => 40,
+        '#start_date' => '-70 years',
+        '#end_date' => '+5 years',
+        '#reference_timestamp' => NULL,
+        '#year_textfield' => 0,
+        '#default_value' => '',
+        '#timezone' => 'user',
+        '#exclude' => array(),
+        '#process' => array('webform_expand_date'),
+        '#theme' => 'webform_date',
+        '#type' => 'date',
+        '#access' => TRUE,
+        '#validated' => TRUE,
+      );
+
+      // Add High School graduation date select to High School fieldset.
+      $high_school_fieldset['high_school_graduation_date'] = $high_school_graduation_date;
+
+      // Create High School button.
+      $high_school_button = array(
+        '#type' => 'markup',
+        '#weight' => 50,
+        '#markup' => '<div class="button-holder"><button id="add-school-history" type="button" class="form-modal-btn">' . t('Add') . '</button></div>',
+        '#format' => 'full_html',
+        '#access' => TRUE,
+      );
+
+      // Add High School button to High School fieldset.
+      $high_school_fieldset['add_school_button'] = $high_school_button;
+
+      // Add High School fieldset select to form.
+      $form['submitted']['educational_history']['institutions_attended']['high_school_fieldset'] = $high_school_fieldset;
+
+      // Create fieldset for Institutions.
+      $institution_fieldset = array(
+        '#title' => t('College / University Attended'),
+        '#type' => 'fieldset',
+        '#weight' => $next_weight,
+        '#description' => t('College/University Attended'),
+        '#attributes' => array(
+          'class' => array('webform-component-fieldset', 'add-inst-popup'),
+        ),
+        '#access' => TRUE,
+      );
+
+      $next_weight++;
+
+      // Create Institution Other Degree select.
+      $institution_other_degree = array(
+        '#required' => 1,
+        '#weight' => 10,
+        '#empty_value' => '',
+        '#empty_option' => t('Degree Earned'),
+        '#options' => _kcc_enrollform_get_datatel_other_degrees(),
+        '#default_value' => NULL,
+        '#type' => 'select',
+        '#access' => TRUE,
+        '#validated' => TRUE,
+      );
+
+      // Add Institution Other Degree select to Institutions fieldset.
+      $institution_fieldset['institution_other_degree'] = $institution_other_degree;
+
+      // Create Institution State select.
+      $institution_state_options = _kcc_enrollform_get_datatel_inst_states();
+      $institution_state = array(
+        '#required' => 1,
+        '#weight' => 20,
+        '#empty_value' => '',
+        '#empty_option' => t('State'),
+        '#options' => $institution_state_options,
+        '#default_value' => NULL,
+        '#type' => 'select',
+        '#access' => TRUE,
+        '#validated' => TRUE,
+      );
+
+      // Add Institution State select to Institutions fieldset.
+      $institution_fieldset['institution_state'] = $institution_state;
+
+      // Create Institutions select.
+      $institutions = array(
+        '#required' => 1,
+        '#weight' => 30,
+        '#empty_value' => '',
+        '#empty_option' => t('Select College'),
+        '#options' => array(),
+        '#default_value' => NULL,
+        '#type' => 'select',
+        '#access' => TRUE,
+        '#validated' => TRUE,
+      );
+
+      // Add Institutions select to Institutions fieldset.
+      $institution_fieldset['institutions'] = $institutions;
+
+      // Create Institution graduation date select.
+      $institution_graduation_date = array(
+        '#title' => t('Date of Graduation'),
+        '#title_display' => 'before',
+        '#required' => 1,
+        '#weight' => 40,
+        '#start_date' => '-70 years',
+        '#end_date' => '0 years',
+        '#reference_timestamp' => NULL,
+        '#year_textfield' => 0,
+        '#default_value' => '',
+        '#timezone' => 'user',
+        '#exclude' => array('day'),
+        '#process' => array('webform_expand_date'),
+        '#theme' => 'webform_date',
+        '#type' => 'date',
+        '#access' => TRUE,
+        '#validated' => TRUE,
+      );
+
+      // Add Institution graduation date select to Institutions fieldset.
+      $institution_fieldset['institution_graduation_date'] = $institution_graduation_date;
+
+      // Create Institution start date select.
+      $institution_start_date = array(
+        '#title' => t('Start Date'),
+        '#title_display' => 'before',
+        '#required' => 1,
+        '#weight' => 50,
+        '#start_date' => '-70 years',
+        '#end_date' => '0 years',
+        '#reference_timestamp' => NULL,
+        '#year_textfield' => 0,
+        '#default_value' => '',
+        '#timezone' => 'user',
+        '#exclude' => array('day'),
+        '#process' => array('webform_expand_date'),
+        '#theme' => 'webform_date',
+        '#type' => 'date',
+        '#access' => TRUE,
+        '#validated' => TRUE,
+      );
+
+      // Add Institution start date select to Institutions fieldset.
+      $institution_fieldset['institution_start_date'] = $institution_start_date;
+
+      // Create Institution end date select.
+      $institution_end_date = array(
+        '#title' => t('End Date'),
+        '#title_display' => 'before',
+        '#required' => 1,
+        '#weight' => 60,
+        '#start_date' => '-70 years',
+        '#end_date' => '5 years',
+        '#reference_timestamp' => NULL,
+        '#year_textfield' => 0,
+        '#default_value' => '',
+        '#timezone' => 'user',
+        '#exclude' => array('day'),
+        '#process' => array('webform_expand_date'),
+        '#theme' => 'webform_date',
+        '#type' => 'date',
+        '#access' => TRUE,
+        '#validated' => TRUE,
+      );
+
+      // Add Institution start date select to Institutions fieldset.
+      $institution_fieldset['institution_end_date'] = $institution_end_date;
+
+      // Create Institution button.
+      $institution_button = array(
+        '#type' => 'markup',
+        '#weight' => 70,
+        '#markup' => '<div class="button-holder"><button id="add-inst-history" type="button" class="form-modal-btn">' . t('Add') . '</button></div>',
+        '#format' => 'full_html',
+        '#access' => TRUE,
+      );
+
+      // Add Institution button to Institutions fieldset.
+      $institution_fieldset['add_inst_button'] = $institution_button;
+
+      // Add Institution fieldset select to form.
+      $form['submitted']['educational_history']['institutions_attended']['institution_fieldset'] = $institution_fieldset;
+
+      $high_school_json = _kcc_enrollform_get_high_school_json();
+      $institutions_json = _kcc_enrollform_get_datatel_institutions(array_keys($institution_state_options));
+
+      drupal_add_js(
+        array(
+          'kcc_enrollform' => array(
+            'high_schools' => $high_school_json,
+            'institutions' => $institutions_json,
+          ),
+        ),
+        'setting'
+      );
+
+      $attended_results_cid = $form['submitted']['educational_history']['institutions_attended']['institutions_attended_results']['#webform_component']['cid'];
+      $attended_results = NULL;
+      if (isset($form_state['storage']['submitted'][$attended_results_cid])) {
+        $attended_results = $form_state['storage']['submitted'][$attended_results_cid];
+      }
+      elseif (isset($form['#submission']->data[$attended_results_cid])) {
+        $attended_results = $form['#submission']->data[$attended_results_cid];
+      }
+
+      $attended_results_html = '';
+      if ($attended_results) {
+        foreach ($attended_results as $attended_result) {
+          if ($attended_result) {
+            if (strpos($attended_result, 's:6:"method"') === FALSE) {
+              $attended_result_arr = explode(',', $attended_result);
+              $input_class = $attended_result_arr[0] == 'S' ? 'school-result' : 'inst-result';
+              $code_key = $attended_result_arr[0] == 'S' ? 2 : 3;
+
+              $attended_result_label = '';
+              if (isset($attended_result_arr[$code_key])) {
+                $attended_result_label = _kcc_enrollform_get_datatel_inst_label($attended_result_arr[$code_key]);
+              }
+
+              $attended_results_html .= '<li>' . $attended_result_label . '<input type="hidden" name="submitted[educational_history][institutions_attended][institutions_attended_results][]" value="' . $attended_result . '" class="' . $input_class . '"></li>';
+            }
+          }
+        }
+      }
+
+      $form['submitted']['educational_history']['institutions_attended']['results_area'] = array(
+        '#type' => 'markup',
+        '#weight' => $next_weight,
+        '#markup' => '<div class="history-items-selected-holder"><ul class="history-items-selected">' . $attended_results_html . '</ul><button id="remove-history-item" type="button" class="">' . t('Remove Selected') . '</button></div>',
+        '#format' => 'full_html',
+        '#access' => TRUE,
+      );
+    }
+
+    $form['#validate'] = array_merge(array('kcc_enrollform_form_validate'), $form['#validate']);
+  }
+}
+
+/**
+ * Make extra validation rules for Enrollment Form.
+ *
+ * @param array $form
+ *   Nested array of form elements that comprise the form.
+ *
+ * @param array $form_state
+ *   A keyed array containing the current state of the form.
+ */
+function kcc_enrollform_form_validate($form, &$form_state) {
+  // print_r($form);
+}
+
+/**
+ * Override or insert variables into the page template.
+ *
+ * @param array $variables
+ *   An array of existing variables of template.
+ */
+function kcc_enrollform_preprocess_page(&$variables) {
+  if (arg(2) != 'edit') {
+    if (isset($variables['node']) && $variables['node']->type == 'enrollform') {
+      $enrollform_top_image_field = field_get_items('node', $variables['node'], 'field_enrollform_top_image');
+      $enrollform_top_image_headline_field = field_get_items('node', $variables['node'], 'field_enrollform_top_img_hdline');
+      $enrollform_top_image_descr_field = field_get_items('node', $variables['node'], 'field_enrollform_top_image_descr');
+
+      $variables['page']['top_enrollform_area'] = theme('top_enrollform_area',
+        array(
+          'enrollform_top_image' => isset($enrollform_top_image_field[0]) ? field_view_value('node', $variables['node'], 'field_enrollform_top_image', $enrollform_top_image_field[0]) : NULL,
+          'enrollform_top_image_headline' => isset($enrollform_top_image_headline_field[0]) ? field_view_value('node', $variables['node'], 'field_enrollform_top_img_hdline', $enrollform_top_image_headline_field[0]) : NULL,
+          'enrollform_top_image_descr' => isset($enrollform_top_image_descr_field[0]) ? field_view_value('node', $variables['node'], 'field_enrollform_top_image_descr', $enrollform_top_image_descr_field[0]) : NULL,
+        ));
+    }
+  }
+}
+
+/**
+ * Implements hook_theme().
+ *
+ * Add extra area on the top of template of Enrollment Form.
+ */
+function kcc_enrollform_theme() {
+  return array(
+    'top_enrollform_area' => array(
+      'template' => '',
+      'variables' => array(
+        'enrollform_top_image' => NULL,
+        'enrollform_top_image_headline' => NULL,
+        'enrollform_top_image_descr' => NULL,
+      ),
+    ),
+  );
+}
+
+/**
+ * Get Institution States from Datatel table.
+ *
+ * @return array
+ *   An array of States for options for select list.
+ */
+function _kcc_enrollform_get_datatel_inst_states() {
+  $query = db_select('datatel_institutions', 'di');
+  $query->innerJoin('datatel_person', 'dp', 'di.institutions_id = dp.id');
+  $query->fields('di', array('institutions_id', 'inst_local_govt_id'));
+  $query->fields('dp', array('last_name', 'preferred_name'));
+  $query->condition('di.inst_type', 'COLL');
+  $query->condition(
+    db_or()
+      ->condition('dp.last_name', '%(STATE)%', 'LIKE')
+      ->condition('inst_local_govt_id', '990000')
+  );
+  $query->orderBy('preferred_name', 'ASC');
+
+  $inst_states = $query->execute();
+
+  $inst_states_options = array();
+  foreach ($inst_states as $inst_state) {
+    $inst_states_options[$inst_state->inst_local_govt_id] = str_replace(' (State) Coll', '', $inst_state->preferred_name);
+  }
+
+  return $inst_states_options;
+}
+
+/**
+ * Get Institutions from Datatel table.
+ *
+ * @param array|null $states
+ *   An array of states.
+ *   If exists institutions by these states will be retrieved.
+ *
+ * @return array
+ *   An array for JSON object for Drupal.setting variable.
+ */
+function _kcc_enrollform_get_datatel_institutions($states = NULL) {
+
+  if (!$states) {
+    $states = array_keys(_kcc_enrollform_get_datatel_inst_states());
+  }
+
+  $query = db_select('datatel_institutions', 'di');
+  $query->innerJoin('datatel_person', 'dp', 'di.institutions_id = dp.id');
+  $query->fields('di', array('institutions_id', 'inst_local_govt_id'));
+  $query->fields('dp', array('last_name', 'preferred_name'));
+  $query->condition('di.inst_type', 'COLL');
+  $query->condition(
+    db_or()
+      ->condition('di.inst_local_govt_id', '17%', 'LIKE')
+      ->condition('di.inst_local_govt_id', $states, 'IN')
+  );
+  $query->orderBy('preferred_name', 'ASC');
+
+  $institutions = $query->execute();
+
+  $institutions_json = array();
+  foreach ($institutions as $institution) {
+    $title_prefix = strpos($institution->last_name, '(STATE)') !== FALSE ? 'Other ' : '';
+    $title = str_replace(' (State)', '', $institution->preferred_name);
+    $institutions_json[] = array(
+      'state' => $institution->inst_local_govt_id,
+      'id' => $institution->institutions_id,
+      'title' => $title_prefix . $title,
+    );
+  }
+
+  return $institutions_json;
+}
+
+/**
+ * Retrieves values for predefined list of select.
+ *
+ * @param array $component
+ *   An array of component.
+ *
+ * @param bool $flat
+ *   Flag.
+ *
+ * @param array $arguments
+ *   An array of arguments.
+ *
+ * @return array
+ *   An array of Values for predefined list of select.
+ */
+function _kcc_enrollform_get_datatel_vals($component, $flat, $arguments) {
+  $query = db_select('datatel_vals', 'dv')
+    ->fields('dv', array('val_internal_code', 'val_external_representation'))
+    ->orderBy('dv.pos', 'ASC');
+
+  if (isset($arguments['valcode_id']) && !empty($arguments['valcode_id'])) {
+    $query->condition('dv.valcode_id', $arguments['valcode_id']);
+  }
+
+  $datatel_vals = $query->execute();
+
+  $datatel_vals_options = array();
+  foreach ($datatel_vals as $datatel_val) {
+    $datatel_vals_options[$datatel_val->val_internal_code] = $datatel_val->val_external_representation;
+  }
+
+  return $datatel_vals_options;
+}
+
+/**
+ * Retrieves Ethnic Groups from Datatel table.
+ *
+ * @return array
+ *   An array of Ethnic Groups for predefined list of select.
+ */
+function _kcc_enrollform_get_datatel_ethnic_groups() {
+  $query = db_select('datatel_ethnics', 'de')
+    ->fields('de', array('ethnics_id', 'eth_desc'));
+
+  $ethnic_groups = $query->execute();
+
+  $ethnic_groups_options = array();
+  foreach ($ethnic_groups as $ethnic_group) {
+    $ethnic_groups_options[$ethnic_group->ethnics_id] = $ethnic_group->eth_desc;
+  }
+
+  return $ethnic_groups_options;
+}
+
+/**
+ * Retrieves Terms from Datatel table.
+ *
+ * @return array
+ *   An array of Terms for predefined list of select.
+ */
+function _kcc_enrollform_get_datatel_terms() {
+  $query = db_select('datatel_terms', 'dt')
+    ->fields('dt', array('terms_id', 'term_desc'))
+    ->condition('dt.term_end_date', '2014-08-10', '>=')
+    ->condition('dt.term_end_date', '2016-06-13', '<=')
+    ->condition('dt.terms_id', 'X%', 'LIKE')
+    ->orderBy('dt.term_end_date', 'ASC');
+
+  $datatel_terms = $query->execute();
+
+  $datatel_terms_options = array();
+  foreach ($datatel_terms as $datatel_term) {
+    $datatel_terms_options[$datatel_term->terms_id] = $datatel_term->term_desc;
+  }
+
+  return $datatel_terms_options;
+}
+
+/**
+ * Retrieves Admit Statuses from Datatel table.
+ *
+ * @return array
+ *   An array of Admit Statuses for predefined list of select.
+ */
+function _kcc_enrollform_get_datatel_admit_statuses() {
+  $query = db_select('datatel_admit_statuses', 'das')
+    ->fields('das', array('admit_statuses_id', 'adms_desc'))
+    ->condition('das.admit_statuses_id', 'TR', '<>');
+
+  $datatel_admit_statuses = $query->execute();
+
+  $datatel_admit_statuses_options = array();
+  foreach ($datatel_admit_statuses as $datatel_admit_status) {
+    $datatel_admit_statuses_options[$datatel_admit_status->admit_statuses_id] = $datatel_admit_status->adms_desc;
+  }
+
+  return $datatel_admit_statuses_options;
+}
+
+/**
+ * Retrieves Academic Programs from Datatel table.
+ *
+ * @return array
+ *   An array of Academic Programs for predefined list of select.
+ */
+function _kcc_enrollform_get_datatel_acad_programs() {
+  $query = db_select('datatel_acad_programs', 'dap')
+    ->fields('dap', array('acad_programs_id', 'acpg_title'))
+    ->condition('dap.acad_programs_id', 'CERT.GS.301', '<>')
+    ->condition('dap.acpg_end_date')
+    ->orderBy('dap.acpg_title', 'ASC');
+
+  $datatel_acad_programs = $query->execute();
+
+  $datatel_acad_programs_options = array();
+  foreach ($datatel_acad_programs as $datatel_acad_program) {
+    $datatel_acad_programs_options[$datatel_acad_program->acad_programs_id] = $datatel_acad_program->acpg_title;
+  }
+
+  return $datatel_acad_programs_options;
+}
+
+/**
+ * Retrieves Degrees from Datatel table.
+ *
+ * @param int|null $id
+ *   Id of Degree.
+ *
+ * @return array
+ *   An array of Degrees for predefined list of select
+ *   or for submission result page.
+ */
+function _kcc_enrollform_get_datatel_other_degrees($id = NULL) {
+
+  $other_degrees_options = array();
+
+  if (!$id || $id == 'NoD') {
+    $other_degrees_options['NoD'] = t('No Degree Earned');
+  }
+
+  if ($id == 'NoD') {
+    return $other_degrees_options;
+  }
+
+  $query = db_select('datatel_other_degrees', 'dod')
+    ->fields('dod', array('other_degrees_id', 'odeg_desc'));
+
+  if ($id) {
+    $query->condition('dod.other_degrees_id', $id);
+  }
+  else {
+    $query->condition('dod.odeg_desc', 'Do Not Use', '<>');
+    $query->condition('dod.odeg_desc', NULL, 'IS NOT NULL');
+    $query->orderBy('dod.other_degrees_id', 'ASC');
+  }
+
+  $other_degrees = $query->execute();
+
+  foreach ($other_degrees as $other_degree) {
+    $other_degrees_options[$other_degree->other_degrees_id] = $other_degree->odeg_desc;
+  }
+
+  return $other_degrees_options;
+}
+
+/**
+ * Retrieves Institution Label from Datatel table.
+ *
+ * @param int $id
+ *   Id of Institution.
+ *
+ * @return string
+ *   A label of Institution.
+ */
+function _kcc_enrollform_get_datatel_inst_label($id) {
+  $query = db_select('datatel_person', 'dp');
+  $query->fields('dp', array('last_name', 'preferred_name'));
+  $query->condition('dp.id', $id);
+
+  $institutions = $query->execute()->fetchAll();
+
+  $institution_label = t('No this value');
+  foreach ($institutions as $institution) {
+    $title_prefix = strpos($institution->last_name, '(STATE)') !== FALSE ? 'Other ' : '';
+    $title = str_replace(' (State)', '', $institution->preferred_name);
+    $institution_label = $title_prefix . $title;
+  }
+
+  return $institution_label;
+}
+
+/**
+ * Generate an array of High Schools for Drupal.settings variable.
+ *
+ * @return array
+ *   An array for JSON object for Drupal.setting variable.
+ */
+function _kcc_enrollform_get_high_school_json() {
+  $high_school_json = array();
+
+  // Add GED High Schools.
+  $ged_high_schools = _kcc_enrollform_get_ged_high_schools();
+  foreach ($ged_high_schools as $key => $value) {
+    $high_school_json[] = array(
+      'type' => 'GED',
+      'state' => '',
+      'id' => $key,
+      'title' => $value,
+    );
+  }
+
+  // Add HS High Schools from Illinois.
+  $high_schools = _kcc_enrollform_get_high_schools();
+  foreach ($high_schools as $school) {
+    $high_school_json[] = array(
+      'type' => 'HS',
+      'state' => 'illinois',
+      'id' => $school->institutions_id,
+      'title' => $school->preferred_name,
+    );
+  }
+
+  // Add HS High Schools Out of States.
+  $high_schools = _kcc_enrollform_get_high_schools(FALSE);
+  foreach ($high_schools as $school) {
+    $high_school_json[] = array(
+      'type' => 'HS',
+      'state' => 'out',
+      'id' => $school->institutions_id,
+      'title' => $school->preferred_name,
+    );
+  }
+
+  return $high_school_json;
+}
+
+/**
+ * Build an Array of High Schools of GED.
+ *
+ * @return array
+ *   an Array of High Schools of GED.
+ */
+function _kcc_enrollform_get_ged_high_schools() {
+  return array(
+    '0003432' => 'Kishwaukee College',
+    '0003431' => 'Illinois (but not Kishwaukee College)',
+    '0003433' => 'Out-of-State',
+  );
+}
+
+/**
+ * Build an Array of High Schools.
+ *
+ * @param bool $is_state
+ *   Checking if retrieves High Schools by state.
+ *
+ * @return array
+ *   an Array of High Schools.
+ */
+function _kcc_enrollform_get_high_schools($is_state = TRUE) {
+  $query = db_select('datatel_institutions', 'di');
+  $query->innerJoin('datatel_person', 'dp', 'di.institutions_id = dp.id');
+  $query->fields('di', array('institutions_id'));
+  $query->fields('dp', array('last_name', 'preferred_name'));
+  $query->condition('di.inst_type', 'HS');
+  $query->condition('dp.last_name', '%(STATE)%', ($is_state ? 'NOT LIKE' : 'LIKE'));
+  $query->orderBy('preferred_name', 'ASC');
+
+  $high_schools = $query->execute()->fetchAll();
+
+  return $high_schools;
+}

@@ -1,0 +1,13 @@
+<?php
+/**
+ * @file
+ * Install, update, and uninstall functions for the kcc_theme module.
+ */
+
+/**
+ * Enables Enrollform feature.
+ */
+function kcc_enrollform_install() {
+  module_enable(array('kcc_enrollform_type_feature'));
+}
+
